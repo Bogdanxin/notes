@@ -88,3 +88,76 @@ int main(int argc, char* argv[]) {
 }
 ```
 
+## primes 
+
+依据为：[Bell Labs and CSP Threads](https://swtch.com/~rsc/thread/)
+
+利用多线程和管道实现素数筛。这里有个细节，当我们拿到一个素数a时候，将剩下的数除以a，如果不能够整除，说明这个数可以进一步判断是否为素数。下一步就是将这个数写入到管道中，进一步进行判断。同时，我们也可以知道，第一个没法被整除的数，就是素数。
+
+>  例如：2 3 4 5 中，我们拿到素数 2，之后的数整除判断，3 没法整除，并且是第一个，说明他就是素数。
+
+```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+#define READEND 0
+#define WRITEEND 1
+#define NUM 35
+
+void child(int* pl);
+
+int main(int argc, int argv) {
+    if (argc != 1) {
+        fprintf(2, "error! usage: primes\n");
+        exit(0);
+    }
+    
+    int pl[2];
+    pipe(pl);
+    
+   	if (fork() == 0) {
+        child(pl);
+    } else {
+        close(pl[READEND]);
+        for (int i = 2; i <= NUM; i++) {
+            write(p[WRITEEND], &i, sizeof(int));
+        }
+        close(pl[WRITEEND]);
+        wait(0);
+    }
+    
+    exit(0);
+}
+
+void child(int* pl) {
+    int pr[2];
+    int buf
+    
+    int tmp = read(pl[READEND], &buf, sizeof(int));
+    if (tmp <= 0) {
+        return ;
+    }
+    
+    pipe(pr);
+    if (fork() == 0) {
+        child(pr);
+    } else {
+        printf("prime %d", buf);
+        
+        close(pr[READEND]);
+        int prime = buf;
+        while (read(pl[READEND], &buf, sizeof(int)) > 0) {
+            if (buf % prime != 0) {
+                write(pr[WRITEEDN], &buf, sizeof(int));
+            }
+        }
+        
+        close(pr[WRITEEND]);
+        wait(0);
+    }
+    
+    exit(0);
+}
+```
+
