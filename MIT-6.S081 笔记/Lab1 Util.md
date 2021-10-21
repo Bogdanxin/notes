@@ -134,6 +134,7 @@ void child(int* pl) {
     int pr[2];
     int buf
     
+    // 读管道，读的数一定会是质数
     int tmp = read(pl[READEND], &buf, sizeof(int));
     if (tmp <= 0) {
         return ;
@@ -147,16 +148,146 @@ void child(int* pl) {
         
         close(pr[READEND]);
         int prime = buf;
+        // 剩下的所有数除质数，只有不能整除的，才有资格到下一个递归中。
         while (read(pl[READEND], &buf, sizeof(int)) > 0) {
             if (buf % prime != 0) {
                 write(pr[WRITEEDN], &buf, sizeof(int));
             }
         }
-        
+      	
         close(pr[WRITEEND]);
         wait(0);
     }
     
+    exit(0);
+}
+```
+
+## find
+
+find 指令 `find <dir> <file>`，输入目录和目标文件，返回该目录下所有的文件路径。
+
+1. 需要了解 ls 的源码，才会很好写。
+2. 使用递归的方式查找，更好理解
+
+
+
+```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/fs.h"
+#include "kernel/fcntl.h"
+
+void find(char* file, char* path) {
+    int fd;
+    char buf[512], *p;
+    struct dirent de;
+    struct stat st;
+    
+    if ((fd = open(path, 0)) < 0) {
+        return;
+    }
+    
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return;
+    }
+    
+    while (read(fd, &de, sizeof(de)) == sizeof(de)) {
+        strcpy(buf, path);
+        p = buf + strlen(buf);
+        *p++ = '/';
+        if (de.inum == 0) {
+            continue;
+        }
+        
+        memmove(p, de.name, DIRSIZ);
+        p[DIRSIZ] = 0;
+        if (stat(buf, &st) < 0) {
+            fprintf(2, "error: cannot stat %s\n", buf);
+            return;
+        }
+        
+        switch(st.type) {
+            case T_FILE:
+                if (strcmp(de.name, file) == 0) {
+                    printf("%s\n", buf);
+                }
+                break;
+                
+            case T_DIR:
+                if (strcmp(de.name, "..") != 0 && strcmp(de.name, ".") != 0) {
+                    find(file, path);
+                }
+                break;
+        }
+    }
+    
+    close(fd);
+    exit(0);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 3) {
+        fprintf(2, "error usage: find dir file\n");
+        exit(1);
+    }
+
+    char* path = argv[1];
+    char* file_name = argv[2];
+
+    find(file_name, path);
+
+    exit(0);
+}
+```
+
+## xargs
+
+xargs 命令就不多说了，Linux 命令里有学到，这里需要了解的是，要读取标准输出，需要从 0 中 read。
+
+```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/param.h"
+
+int main(int argc, char* argv[]) {
+    char* command = argv[1];
+    char* paramv[MAXARG];
+    int len;
+    int index = 0;
+    char buf[1024];
+
+    for (int i = 1; i < argc; i++) {
+        paramv[index++] = argv[i];
+    }
+    
+    while ((len = read(0, &buf, 1024)) > 0) {
+        if (fork() == 0){
+            char *tmp = (char*) malloc(sizeof(buf));
+            int tmp_index = 0;
+            for (int i = 0; i < len; i++) {
+
+                if (buf[i] == ' ' || buf[i] == '\n') {
+                    tmp[tmp_index] = 0;
+                    paramv[index++] = tmp;
+                    tmp = (char*) malloc(sizeof(buf));
+                    tmp_index = 0;
+                } else {
+                    tmp[tmp_index++] = buf[i];
+                }
+            }
+
+            tmp[tmp_index] = 0;
+            paramv[index] = 0;
+            exec(command, paramv);
+        } else {
+            wait(0);
+        }
+    }
+
     exit(0);
 }
 ```
