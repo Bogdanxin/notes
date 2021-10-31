@@ -196,3 +196,35 @@ public class TestScattingReads {
 
 粘包是因为在传输过程中，发送端为了提高效率，会将多条消息合并发送，这样就导致多条消息如同黏连在一起一样，半包是由于在发送端和接收端缓存空间是有限的，就有可能出现某条消息发送过程中缓存空间不足，只能发送一部分数据的情况，另一部分需要在下次才能够发送。
 
+## 文件编程 FileChannel
+
+### 传输 transferTo()
+
+```java
+try (
+	FileChannel from = new FileInputStream().getChannel();
+    FileChannel to = new FileOutPutStream().getChannel();
+) {
+    from.transferTo(0, from.size(), to);
+} catch (IOException e) {
+    e.printStackTrace();
+}
+```
+
+使用 transferTo 方法效率要高，底层会使用操作系统的零拷贝优化。
+
+#### 缺陷
+
+transferTo 一次传输，最大数据量只有 2g，如果超过 2g，就需要重复此操作
+
+```java
+size = from.size();
+for (long left = size; left > 0;) {
+    left -= from.transferTo(size - left, left, to);
+}
+```
+
+ 
+
+## 网络编程
+
