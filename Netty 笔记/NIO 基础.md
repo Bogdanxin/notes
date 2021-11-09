@@ -196,7 +196,7 @@ public class TestScattingReads {
 
 粘包是因为在传输过程中，发送端为了提高效率，会将多条消息合并发送，这样就导致多条消息如同黏连在一起一样，半包是由于在发送端和接收端缓存空间是有限的，就有可能出现某条消息发送过程中缓存空间不足，只能发送一部分数据的情况，另一部分需要在下次才能够发送。
 
- 
+
 ## 文件编程
 
 ### FileChannel
@@ -271,36 +271,40 @@ for (long left = size; left > 0;) {
 
 ## 网络编程
 
-### 阻塞
+### 阻塞 & 非阻塞
 
 阻塞编程就是服务端或者客户端建立连接，或者处理发送消息时，会对对方进行等待，如果一直没有获取到消息或者建立连接，那么对象就会一直处于等待状态，尽管此时的 cpu 没有进行其他的处理，但是 cpu 处于空闲状态，影响效率。
 
-#### 服务端
+#### 阻塞服务端
 
 1. 创建一个 ServerSocketChannel 作为服务端。
 2. channel 绑定端口进行监听
 3. 执行 `accept()` 方法等待连接建立（阻塞）
 4. 读取数据，进行通信（通过设置 buffer）
 
-#### 客户端
+#### 阻塞客户端
 
 1. 创建 SocketChannel 
 2. 绑定服务端接口
 3. 发送数据
 
-### 非阻塞
-
-#### 服务端
+#### 非阻塞服务端
 
 基本操作和上面一样，只不过在 `open`建立连接 和 `accept` 读取数据的时候，需调用 `configureBlocking()`方法设为非阻塞形式，这样如果没有建立连接或者没有读取到数据，就会返回 null 或者 0，然后继续执行。
 
-#### 优缺点
+##### 优缺点
 
 优点：能够正确处理多个连接，不会因为一个连接的问题导致其他连接一直等待连接和数据处理
 
 缺点：由于如果没有获取到连接或者没有数据读取，就会进行下一个循环，cpu 一直在空转，导致利用率不高
 
 ### 使用 Selector
+
+#### 多路复用
+
+在单线程下，配合 Selector 完成对多个 channel 可读写事件的监控，称之为**多路复用**。在单线程下，如果发生事件，则会进行处理，如果没有发生则会阻塞。
+
+
 
 通过 selector 对事件监听，从而既能够保证非阻塞，还能够防止一直接收不到链接或者数据而空转。
 
@@ -342,13 +346,16 @@ public class Server {
                     log.debug("{}", sc);
                     log.debug("scKey:{}", scKey);
                 } else if (key.isReadable()) { // 如果是 read
-                    SocketChannel channel = (SocketChannel) key.channel();
-                    ByteBuffer buffer = ByteBuffer.allocate(16);
-                    channel.read(buffer);
-                    ByteBufferUtil.debugRead(buffer);
-                } else {
-                    System.out.println("-----------");
-                }
+                    try {
+                        SocketChannel channel = (SocketChannel) key.channel();
+                        ByteBuffer buffer = ByteBuffer.allocate(16);
+                        channel.read(buffer);
+                        ByteBufferUtil.debugRead(buffer);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        key.cancel();
+                    }
+                } 
             }
         }
     }
@@ -369,10 +376,38 @@ public class Server {
     * read - 数据可读入时触发，有因为接受能力弱，数据暂不能读入的情况
     * write - 数据可写出时触发，有因为发送能力弱，数据暂不能写出的情况
 
-####  为何要 iter.remove()
+####  为何要 remove()
 
 > 因为 select 在事件发生后，就会将相关的 key 放入 selectedKeys 集合，但不会在处理完后从 selectedKeys 集合中移除，需要我们自己编码删除。例如
 >
 > * 第一次触发了 ssckey 上的 accept 事件，没有移除 ssckey 
 > * 第二次触发了 sckey 上的 read 事件，但这时 selectedKeys 中还有上次的 ssckey ，在处理时因为没有真正的 serverSocket 连上了，就会导致空指针异常
->>>>>>> 300b8c87b63d331cd12bf3e11e406dc854fc0b32
+
+#### 处理消息边界
+
+![image-20211102211322917](https://raw.githubusercontent.com/Bogdanxin/cloudImage/master/img/202111022113623.png)
+
+
+
+* 一种思路是固定消息长度，数据包大小相同，服务器按照预定长度读取，缺点是浪费带宽
+* 另一种思路是按照分隔符拆分，需要多次复制、移动数据，效率低
+* TLV 模式，即 Type 类型、Length 长度、Value 数据，类型和长度已知的情况下，可以方便的获取消息大小，分配合适的 buffer，缺点是 buffer 需要提前分配，内容过大会影响 server 的容量。
+
+##### 处理方法
+
+按照方法二进行处理
+
+1. 因为如果出现一个 buffer 存放不完的情况，那么我们需要对这个 buffer 进行扩容，但是我们也不能将这个 buffer 共享给所有的 channel。所以我们要在 selector 注册 channel 时候，``register(channel, 事件, buffer);`` 这样就能够保证每个 channel 独占一个 buffer。
+2. 如果一次读取过程中，没有完整的数据被读取出来，说明数据量是大于 buffer 大小的，`compact()`方法压缩后的 position == limit ，那么需要进行扩容
+
+#### 可读事件
+
+当a向b发送数据时，不一定能够保证接收端马上接收到，这时候如果一直在等待可写，或者循环尝试写入，都是浪费效率的，所以就引入了**可写事件**，当没有触发可写事件，a 就可以执行其他的操作，直到触发可写事件，然后就可以对数据进一步写入了。
+
+### 多线程优化
+
+原因：
+
+1. 单线程对多核 CPU 的利用率不高
+2. 单线程最怕一直处理某个数据，从而将后续的数据阻塞
+
