@@ -411,3 +411,128 @@ public class Server {
 1. 单线程对多核 CPU 的利用率不高
 2. 单线程最怕一直处理某个数据，从而将后续的数据阻塞
 
+#### 模型
+
+设置两组 selector ，一组一个 boss，一组多个 worker，boss 处理 accept 事件，worker 处理 read、write 事件。
+
+> 注意:
+>
+> 当 selector 已经执行 `select` 方法时候，其他线程即使执行 `register` 方法，将 channel 注册到 selector 上，也会被 `select` 方法阻塞。必须等到 `select` 方法执行，也就是有事件触发时，才可以继续执行。
+>
+> 这时候，我们可以使用 selector 的 `wakeup` 方法，如果出现阻塞，但是没有注册事件，``wakeup` 就会将`select`终止阻塞，从而保证能够一定注册到事件。
+
+
+
+```java
+@Slf4j
+public class MultiThreadServer {
+
+   public static void main(String[] args) throws IOException {
+      Thread.currentThread().setName("boss");
+
+      ServerSocketChannel ssc = ServerSocketChannel.open();
+      ssc.configureBlocking(false);
+      Selector boss = Selector.open();
+      ssc.register(boss, SelectionKey.OP_ACCEPT, null);
+      ssc.bind(new InetSocketAddress(8080));
+
+      // 创建固定数量的 worker
+
+      Worker[] workers = new Worker[2];
+      for (int i = 0; i < 2; i++) {
+         workers[i] = new Worker("worker-" + i);
+      }
+
+      AtomicInteger index = new AtomicInteger();
+      while (true) {
+         boss.select();
+         Iterator<SelectionKey> iterator = boss.selectedKeys().iterator();
+         while (iterator.hasNext()) {
+            SelectionKey key = iterator.next();
+            iterator.remove();
+            if (key.isAcceptable()) {
+               ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+               SocketChannel sc = serverSocketChannel.accept();
+               sc.configureBlocking(false);
+               log.debug("connected ... {}", sc.getRemoteAddress());
+               log.debug("before register ... {}", sc.getRemoteAddress());
+               workers[index.getAndIncrement() % workers.length].register(sc);
+
+               log.debug("after register ... {}", sc.getRemoteAddress());
+            }
+         }
+      }
+   }
+
+   static class Worker implements Runnable{
+      private Thread thread;
+      private Selector selector;
+      private String name;
+      private volatile boolean start = false;
+      private ConcurrentLinkedQueue<Runnable> queue = new ConcurrentLinkedQueue<>();
+
+      public Worker(String name) {
+         this.name = name;
+      }
+
+      /**
+       * 初始化线程和 selector
+       */
+      public void register(SocketChannel sc) throws IOException {
+         if (!start){
+            thread = new Thread(this, name);
+            selector = Selector.open();
+            thread.start();
+            start = true;
+         }
+
+         // 分析一下为什么要这么做：
+         // 在我们 boss 线程调用 register 方法时候，这个方法还是在 boss 线程执行的，
+         // 所以执行 register 时候还是与 selector 方法并行，不能够保证顺序问题，
+         // 于是会出现多个客户端连接时没法执行 register 方法的现象
+         // 所以我们需要将这个方法传递到 worker 线程中，在 worker 线程中执行从而保证顺序 。
+         // 这时候就需要 queue 传递 runnable 接口，实现 run 方法
+         selector.wakeup();
+         sc.register(selector, SelectionKey.OP_READ, null);
+
+      }
+
+      @Override
+      public void run() {
+         while (true) {
+            try {
+               selector.select();
+               Runnable task = queue.poll();
+               if (task != null) {
+                  task.run();
+               }
+//             selector.select(); 不再这里调用 select 方法的原因是，
+//             我们在并行操作时候，queue 中添加 task 时，selector 也在执行 select 方法
+//             （poll 的 task 为空，还是并行的）所以 select 还是被阻塞住了，同时还没有 read 事件的注册，
+//             加了 wakeup 后，就能够保证即使 task 为空，select 也会被 wakeup 终止，从而将事件注册
+               // 其实就是需要一个 wakeup 就能解决
+
+               Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+               while (iterator.hasNext()) {
+                  SelectionKey key = iterator.next();
+                  iterator.remove();
+                  if (key.isReadable()) {
+                     SocketChannel channel = (SocketChannel) key.channel();
+                     ByteBuffer buffer = ByteBuffer.allocate(16);
+//                   ByteBuffer buffer = (ByteBuffer) key.attachment();
+                     log.debug("read ... {}", channel.getRemoteAddress());
+                     channel.read(buffer);
+                     buffer.flip();
+                     ByteBufferUtil.debugAll(buffer);
+                  }
+               }
+            } catch (IOException e) {
+               e.printStackTrace();
+            }
+
+         }
+      }
+   }
+}
+```
+
