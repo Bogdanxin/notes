@@ -255,6 +255,7 @@ public class EventLoopClient {
 
 	public static void main(String[] args) throws InterruptedException {
 
+        
 		// 带有 future 或者 promise 名称的类，都是配合异步方法使用，用来正确处理结果
 		ChannelFuture future = new Bootstrap()
 				.group(new NioEventLoopGroup())
@@ -275,6 +276,7 @@ public class EventLoopClient {
 
 		future.addListener(new ChannelFutureListener() {
 			@Override
+            // 在 nio 线程建立好后会调用 operationComplete 方法
 			public void operationComplete(ChannelFuture future) throws Exception {
 				Channel channel = future.channel();
 				log.debug("{}", channel);
@@ -285,5 +287,343 @@ public class EventLoopClient {
 }
 ```
 
-1. 在 ChannelFuture 对象调用 `sync`方法，该方法会阻塞当前线程，直到成功建立连接，这时候再获取到的就是建立好连接的 channel
+1. 在 ChannelFuture 对象调用 `sync`方法，该方法会阻塞当前线程[main]，直到成功建立连接，这时候再获取到的就是建立好连接的 channel
 2. 在 ChannelFuture 对象调用 `addListener`方法，传入一个 `ChannelFutureListener` 回调对象，重写 `operationComplete` 方法，这个方法会异步处理结果，这里的「异步」是将传入的回调方法交给其他线程执行，也就是说，当前线程执行到 `addListener` 方法就会继续执行，而回调方法会在连接建立后被调用
+
+#### CloseFuture
+
+在客户端关闭连接之后，我们需要进行若干操作进行善后工作，但是 `channel.close()`方法是一个异步操作，也就是说，调用这个方法后，关闭连接的操作会交给其他线程操作，那么有可能就会导致善后操作提前于关闭连接，进而导致出现错误。所以我们引入了 **closeFuture**。
+
+`closeFuture()`返回值也是一个 ChannelFuture 类对象，不过他代表的是关闭连接的异步操作。这时候就和上面的处理**建立连接**异步操作的方法一样，要么同步等待关闭连接，要么添加一个 listener 异步等待连接关闭。
+
+```java
+ChannelFuture closeFuture = channel.closeFuture();
+// 方法一，线程阻塞同步等待
+closeFuture.sync();
+log.debug("执行关闭连接之后的操作");
+
+// 方法二，新建 listener 异步等待
+closeFuture.addListener(new ChannelFutureListener() {
+    public void operationComplete(ChannelFuture future) throws Exception {
+        log.debug("处理关闭之后的操作");
+    }
+});
+```
+
+### Future & Promise
+
+![](/Users/eleme/Documents/notes/Netty 笔记/image-20211121135024488.png)
+
+异步处理时，常需要这两个接口，继承关系如上图所示
+
+* jdk Future 接口只能够同步等待任务结束（成功或者失败）才能够返回结果。
+* netty Future 接口可以同步（主线程调用 sync 方法）或者异步（``addListener` 方法）等待任务结束得到结果，但是都还是要等待任务结束
+* netty Promise 接口不仅有 netty Future 的功能，而且脱离了任务独立存在，只作为两个线程之间传递结果的容器
+
+> Future 可以理解为线程之间传递结果的容器，future 的结果是由产生结果的线程传递到 future 中，然后其他线程等待 future 获取到结果，再从 future 中获取结果，整个过程 future 是被动的接收。
+>
+> Promise 则是主动设置结果的容器，可以在线程执行过程中，主动（自己写代码）向 promise 容器中写入数据
+
+
+
+```java
+@Slf4j
+public class TestJdkFuture {
+
+	public static void main(String[] args) throws ExecutionException, InterruptedException {
+		ExecutorService service = Executors.newFixedThreadPool(2);
+		Future<Integer> fur = service.submit(new Callable<Integer>() {
+			@Override
+			public Integer call() throws Exception {
+				Thread.sleep(1000);
+				return 100;
+			}
+		});
+
+		log.debug("等待结果...");
+		log.debug("结果是 {}" , fur.get());
+	}
+}
+
+@Slf4j
+public class TestNettyFuture  {
+	public static void main(String[] args) throws ExecutionException, InterruptedException {
+		NioEventLoopGroup group = new NioEventLoopGroup();
+		EventLoop eventLoop = group.next();
+		Future<Integer> future = eventLoop.submit(new Callable<Integer>() {
+			@Override
+			public Integer call() throws Exception {
+				log.debug("执行计算");
+				Thread.sleep(1000);
+				return 100;
+			}
+		});
+
+		log.debug("等待结果");
+		log.debug("结果为 {}", future.get());
+//		future.addListener(new GenericFutureListener<Future<? super Integer>>() {
+//			@Override
+//			public void operationComplete(Future<? super Integer> future) throws Exception {
+//				log.debug("接收结果:{}", future.getNow());
+//			}
+//		})
+	}
+
+
+}
+
+@Slf4j
+public class TestNettyPromise {
+	
+	public static void main(String[] args) throws ExecutionException, InterruptedException {
+		// 1. 准备 EventLoopGroup
+		EventLoop eventExecutors = new NioEventLoopGroup().next();
+
+		// 2. 主动创建 promise
+		DefaultPromise<Integer> promise = new DefaultPromise<>(eventExecutors);
+
+		new Thread(() -> {
+			log.debug("开始计算");
+			try {
+				Thread.sleep(1000);
+				int i = 1 / 0;
+				promise.setSuccess(123);
+			} catch (Exception e) {
+				e.printStackTrace();
+				promise.setFailure(e);
+			}
+
+		}).start();
+
+		log.debug("等待结果");
+		log.debug("结果是 : {}", promise.get());
+	}
+}
+```
+
+### Handler & Pipeline
+
+Handler 作为入站或者出站数据的处理器，是与 Pipeline 结合使用的。Handler 又分为 ChannelInboundHandlerAdpater（入站） 和 ChannelOutboundHandlerAdapter（出站）两种。
+
+* 入站 handler 用于处理入站的数据，多重写 channelRead 方法
+
+  注意点有：
+
+  * 入站 handler 要想形成调用链，必须在每个 handler 重写的 channelRead 方法中调用 `super.channelRead` 方法或者调用`ctx.fireChannelRead`方法，这样才能够将每个 handler 处理的数据传递给下一个 handler。
+  * 有些情况下，需要将数据处理完毕后发送给客户端，需要调用 `writeAndFlush` 方法发送给 outboundhandler。这里有两种发送方式，一种是调用 `initChannel` 方法入参的 channel 对象的 `writeAndFlush` 方法，另一种是调用 `channelRead`入参中 ctx 的`writeAndFlush` 方法。两种不同点是：
+    * 前者会将所有的 InboundHandler 执行完，再反过来执行 OutboundHandler。也就是说，所有的入站出站 handler 都会走一遍。
+    * 后者只会执行调用 `ctx.writeAndFlush`方法之前的 outboundHandler。也就是说，会遍历所有的 InboundHandler，OutBoundHandler 只会遍历调用之前的。
+
+* 出站 handler 用于处理出站的数据，多重写 write 方法 
+
+
+
+这里对 pipeline 的 InboundHandler 和 OutBoundHandler 的调用顺序以及 `writeAndFlush` 方法的区别测试狠详尽了
+
+```java
+@Slf4j
+public class TestPipeline {
+	public static void main(String[] args) {
+		new ServerBootstrap()
+				.group(new NioEventLoopGroup())
+				.channel(NioServerSocketChannel.class)
+				.childHandler(new ChannelInitializer<NioSocketChannel>() {
+					@Override
+					protected void initChannel(NioSocketChannel ch) throws Exception {
+						// 1. 通过 channel 获取 pipeline
+						ChannelPipeline pipeline = ch.pipeline();
+						// 2. 添加处理器   head -> addHandler() -> tail
+						pipeline.addLast("h1", new ChannelInboundHandlerAdapter() {
+							@Override
+							public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+								log.debug("1");
+//								// super.channelRead 方法会将当前结果传递给下一个 handler
+//								// 如果不调用，入站链会断开
+								super.channelRead(ctx, msg);
+								ctx.writeAndFlush(ctx.alloc().buffer().writeBytes("hello".getBytes()));
+							}
+						});
+						pipeline.addLast("h4", new ChannelOutboundHandlerAdapter() {
+							@Override
+							public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+								log.debug("4");
+								super.write(ctx, msg, promise);
+							}
+						});
+						pipeline.addLast("h2", new ChannelInboundHandlerAdapter() {
+							@Override
+							public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+								log.debug("2");
+								super.channelRead(ctx, msg);
+
+							}
+						});
+
+
+						pipeline.addLast("h5", new ChannelOutboundHandlerAdapter() {
+							@Override
+							public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+								log.debug("5");
+								super.write(ctx, msg, promise);
+							}
+						});
+						pipeline.addLast("h3", new ChannelInboundHandlerAdapter() {
+							@Override
+							public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+								log.debug("3");
+								super.channelRead(ctx, msg);
+//								ctx.writeAndFlush(ctx.alloc().buffer().writeBytes("server...".getBytes()));
+								ctx.writeAndFlush(ctx.alloc().buffer().writeBytes("server...".getBytes()));
+							}
+						});
+
+
+
+						pipeline.addLast("h6", new ChannelOutboundHandlerAdapter() {
+							@Override
+							public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+								log.debug("6");
+								super.write(ctx, msg, promise);
+							}
+						});
+					}
+				})
+				.bind(8080);
+	}
+
+}
+
+```
+
+### ByteBuf
+
+#### 直接内存&堆内存
+
+堆内存创建 ByteBuf
+
+`ByteBuf buffer = ByteBufAllocator.DEFAULT.heapBuffer(10);`
+
+直接内存创建 ByteBuf
+
+`ByteBuf buffer = ByteBufAllocator.DEFAULT.directBuffer(10);`
+
+* 直接内存创建销毁代价比较高，但是读写性能高（少一次内存复制），适合配合池化功能一起用
+* 直接内存对 GC 压力小，因为不受 jvm 内存管理，但是也需要使用完毕后释放
+
+#### 池化 & 非池化
+
+池化的意义在于可以重用 ByteBuf，有以下优点：
+
+* 没有池化，每次都得创建新的 ByteBuf 对象，操作对直接内存很昂贵，对堆内存gc 也不友好
+* 有了池化会对 ByteBuf 重用，采用 jemalloc 的内存分配提高分配效率
+* 高并发时，池化功能更减少内存消耗，降低内存溢出的风险
+
+#### 扩容
+
+扩容规则是：
+
+* 如果写入数据小于 512，扩容容量为下一个 16 的倍数
+* 如果写入数据大于 512，扩容容量为下一个 2^n
+* 扩容容量不得超过最大容量
+
+#### 读取
+
+例如读了 4 次，每次一个字节
+
+```java
+System.out.println(buffer.readByte());
+System.out.println(buffer.readByte());
+System.out.println(buffer.readByte());
+System.out.println(buffer.readByte());
+log(buffer);
+```
+
+读过的内容，就属于废弃部分了，再读只能读那些尚未读取的部分
+
+```
+1
+2
+3
+4
+read index:4 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 05 00 00 00 06                         |........        |
++--------+-------------------------------------------------+----------------+
+```
+
+如果需要重复读取 int 整数 5，怎么办？
+
+可以在 read 前先做个标记 mark
+
+```java
+buffer.markReaderIndex();
+System.out.println(buffer.readInt());
+log(buffer);
+```
+
+结果
+
+```
+5
+read index:8 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 06                                     |....            |
++--------+-------------------------------------------------+----------------+
+```
+
+这时要重复读取的话，重置到标记位置 reset
+
+```java
+buffer.resetReaderIndex();
+log(buffer);
+```
+
+这时
+
+```
+read index:4 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 05 00 00 00 06                         |........        |
++--------+-------------------------------------------------+----------------+
+```
+
+还有种办法是采用 get 开头的一系列方法，这些方法不会改变 read index
+
+#### 释放
+
+由于 Netty 中有堆外内存的 ByteBuf 实现，堆外内存最好是手动来释放，而不是等 GC 垃圾回收。
+
+* UnpooledHeapByteBuf 使用的是 JVM 内存，只需等 GC 回收内存即可
+* UnpooledDirectByteBuf 使用的就是直接内存了，需要特殊的方法来回收内存
+* PooledByteBuf 和它的子类使用了池化机制，需要更复杂的规则来回收内存
+
+Netty 这里采用了引用计数法来控制回收内存，每个 ByteBuf 都实现了 ReferenceCounted 接口
+
+* 每个 ByteBuf 对象的初始计数为 1
+* 调用 release 方法计数减 1，如果计数为 0，ByteBuf 内存被回收
+* 调用 retain 方法计数加 1，表示调用者没用完之前，其它 handler 即使调用了 release 也不会造成回收
+* 当计数为 0 时，底层内存会被回收，这时即使 ByteBuf 对象还在，其各个方法均无法正常使用
+
+##### release 的时机？
+
+一般情况下，不能够直接通过 try-catch-finally 直接释放，因为 pipeline 上有多个 handler，每个 handler 都有可能获取上一个传递过来的 ByteBuf，这时候如果前一个 handler 释放了 ByteBuf，后一个 handler 就没有可用的 ByteBuf，从而导致出现异常。所以负责释放 ByteBuf 的时机很重要。
+
+基本规则是：谁最后使用，谁负责释放。
+
+> * 起点，对于 NIO 实现来讲，在 io.netty.channel.nio.AbstractNioByteChannel.NioByteUnsafe#read 方法中首次创建 ByteBuf 放入 pipeline（line 163 pipeline.fireChannelRead(byteBuf)）
+> * 入站 ByteBuf 处理原则
+>   * 对原始 ByteBuf 不做处理，调用 ctx.fireChannelRead(msg) 向后传递，这时无须 release
+>   * 将原始 ByteBuf 转换为其它类型的 Java 对象，这时 ByteBuf 就没用了，必须 release
+>   * 如果不调用 ctx.fireChannelRead(msg) 向后传递，那么也必须 release
+>   * 注意各种异常，如果 ByteBuf 没有成功传递到下一个 ChannelHandler，必须 release
+>   * **假设消息一直向后传，那么 TailContext 会负责释放未处理消息（原始的 ByteBuf）**
+> * 出站 ByteBuf 处理原则
+>   * **出站消息最终都会转为 ByteBuf 输出，一直向前传，由 HeadContext flush 后 release**
+> * 异常处理原则
+>   * 有时候不清楚 ByteBuf 被引用了多少次，但又必须彻底释放，可以循环调用 release 直到返回 true
