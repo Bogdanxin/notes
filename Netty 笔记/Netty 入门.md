@@ -287,3 +287,40 @@ public class EventLoopClient {
 
 1. 在 ChannelFuture 对象调用 `sync`方法，该方法会阻塞当前线程，直到成功建立连接，这时候再获取到的就是建立好连接的 channel
 2. 在 ChannelFuture 对象调用 `addListener`方法，传入一个 `ChannelFutureListener` 回调对象，重写 `operationComplete` 方法，这个方法会异步处理结果，这里的「异步」是将传入的回调方法交给其他线程执行，也就是说，当前线程执行到 `addListener` 方法就会继续执行，而回调方法会在连接建立后被调用
+
+
+
+#### 零拷贝
+
+注意，这里的「netty 的零拷贝」不是指的操作系统级别的「零拷贝」，而是 netty 为了减少 ByteBuf 的复制拷贝，特地创建的 api。主要意义就在于对一个 ByteBuf 可以切为（Slice）多个，但是整体引用还在一个，对于多个 ByteBuf，可以「合并」为一个，但是只是逻辑上的合并。
+
+##### slice 方法
+
+```java
+ByteBuf buf = ByteBufAllocator.DEFAULT.buffer(10);
+buf.writeBytes(new byte[] {'a', 'b', 'c', 'd', 'e','f', 'g', 'h', 'i', 'j'});
+log(buf);
+
+ByteBuf buf1 = buf.slice(0, 6);
+ByteBuf buf2 = buf.slice(4, 6);
+```
+
+> 注意事项：
+>
+> 1. slice 是对原 ByteBuf 进行切片，所以当对一个 ByteBuf 切片成多个的时候，每个切片都是引用的原有同一个 ByteBuf，这就要注意如果原 ByteBuf 被修改，其他的切片也会有相应影响
+> 2. 同上所述，如果几个 ByteBuf 切片有共同区域，那么修改同一个区域也会造成影响。
+
+##### addComponent 方法
+
+```java
+ByteBuf buf1 = ByteBufAllocator.DEFAULT.buffer();
+buf1.writeBytes(new byte[] {1, 2, 3, 4, 5});
+ByteBuf buf2 = ByteBufAllocator.DEFAULT.buffer();
+buf2.writeBytes(new byte[] {6, 7, 8, 9, 10});
+
+CompositeByteBuf byteBuf = ByteBufAllocator.DEFAULT.compositeBuffer();
+byteBuf.addComponents(true, buf1, buf2);
+
+TestSlice.log(byteBuf);
+```
+
