@@ -232,36 +232,3 @@ public ByteBuf allocate(ByteBufAllocator alloc) {
 首先通过 guess 方法选择一个 ByteBuf 的初始大小，由于是 IOBuffer，所以生成的 ByteBuf 都是直接内存的，反应到代码上就是ioBuffer方法。
 
 ### rpc构建
-
-
-
-
-
-## 源码分析
-
-### 启动分析
-
-首先走一遍仅仅使用 NIO 启动一个服务端的过程
-
-```java
-// 创建 selector，在 netty 中存在于 NioEventLoopGroup 封装线程和 selector
-Selector selector = Selector.open();
-
-// 创建 Netty 层面的 Channel，同时初始化相关联的 Channel 以及为原生的 ssc 存储 config
-NioServerSocketChannel attachment = new NioServerSocketChannel();
-
-// 创建 NioServerSocketChannel 时，创建了 java 原生的 ServerSocketChannel
-ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
-serverSocketChannel.configureBlocking(false);
-
-// 启动 nio boss 线程执行接下来操作
-// 注册，仅关联 selector 和 NioServerSocketChannel，未关注事件
-serverSocketChannel.register(selector, 0, attachment);
-
-// head -> 初始化器 -> ServerBootstrapAcceptor -> tail， 初始化器只是一次性的，只为了添加 acceptor
-// bind 端口
-serverSocketChannel.bind(new InetSocketAddress(8080));
-// 触发 channel active 事件，在 head 中关注 op_accept事件
-selectionKey.interestOps(SelectionKey.OP_ACCEPT);
-```
-
