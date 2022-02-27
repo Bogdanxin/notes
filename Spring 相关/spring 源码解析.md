@@ -1,5 +1,7 @@
 # spring 源码解析
 
+请搭配[Spring.xmind](Spring.xmind)和[Spring 注解驱动.xmind](Spring注解驱动开发.xmind)一起使用。
+
 ## AOP 原理
 
 ### AOP 使用方法：
@@ -711,4 +713,98 @@ AspectJAfterThrowingAdvice#invoke
 
 #### AOP 调用流程总结
 
-![image-20220227124025588](https://raw.githubusercontent.com/Bogdanxin/cloudImage/master/image-20220227124025588.png)
+![ ](https://raw.githubusercontent.com/Bogdanxin/cloudImage/master/image-20220227124025588.png)
+
+## Spring 事务的执行过程
+
+
+
+## Spring 容器创建
+
+
+
+## Spring 拓展
+
+下面这些都比较简单，所以分析流程就不会特别细致，可以通过 debug 看懂
+
+### BeanFactoryPostProcessor
+
+#### 与BeanPostProcessor 不同之处
+
+- BeanPostProcessor 是 bean 的后置处理器，bean 创建对象初始化前后进行拦截工作
+- BeanFactoryPostProcessor 是 BeanFactory 的后置处理器，在 BeanFactory 标准初始化后调用，所有的 bean 定义信息已经加载到 beanFactory，但是还未创建实例
+
+#### 调用流程
+
+1. 在 refresh 方法的invokeBeanFactoryPostProcessors() 调用，所以说优先于其他的 BeanPostProcessor 和自定义 bean
+2. 对所有 BeanFactoryPostProcessor 进行排序，然后依次调用他们的 postProcessBeanFactory
+
+### BeanDefinitionRegistryPostProcessor
+
+#### 与 BeanFactoryPostProcessor 关系
+
+BeanDefinitionRegistryPostProcessor是 BeanFactoryPostProcessor的子接口
+
+- BeanDefinitionRegistryPostProcessor 是 bean定义信息后置处理器，在 bean 定义信息将要加载到容器之前执行拦截工作。
+- 所以说，BeanDefinitionRegistryPostProcessor 执行顺序还要优先于BeanFactoryPostProcessor，可以利用它向容器中添加新的 bean 定义信息
+
+#### 源码调用流程分析
+
+1. refresh 方法中调用` invokeBeanFactoryPostProcessors() `方法
+2. 先调用 BeanDefinitionRegistryPostProcessor 实现类的 `postProcessBeanDefinitionRegistry` 方法
+- 然后调用 BeanDefinitionRegistryPostProcessor 继承了 BeanFactoryPostProcessor 的 `postProcessBeanFactory` 方法
+- 最后单独从容器中找只实现了 BeanFactoryPostProcessor 的类，调用 `postProcessBeanFactory` 方法
+
+### ApplicationListener
+
+常用于 Spring 发布事件
+
+#### 使用方法
+
+1. 需要自行声明一个 ApplicationListener 接口的类，重写 onApplication 方法，这个方法会在接收到事件后被驱动从而被执行。默认 Spring 容器启动和关闭都会发布事件
+2. 如果需要自行发布，可以通过容器的 publishEvent 方法发布事件
+3. `@EventListener` 自定义监听事件，可以确定监听事件的类型，以及相关的逻辑
+
+#### 源码分析
+
+##### 发布事件
+
+1. `refresh` 方法中调用 `publishEvent` 方法发布实例初始化完毕的事件；
+2. 自行调用 context 的 `publishEvent` 方法，发布自定义事件；
+3. 容器关闭调用 `close` 方法，也会向 listener 发布容器关闭的事件
+
+具体实现：`publishEvent` 方法中拿到事件多播器，调用`multicastEvent` 方法，向容器中的 listener 发送事件，调用 ApplicationListener 的重写方法（此时就是对事件的监听了）
+
+在向listener 发送事件时，多播器如果有线程池，可以将任务给线程池，线程池异步发送事件。
+
+##### 事件多播器的初始化
+
+ - `refresh` 方法中的 `initApplicationEventMulticaster(); `
+    方法会初始化多播器
+ - 如果容器中有自定义的事件多播器实例，则取出实例，并注册到 ApplicationContext 中
+- 如果没有，则自行创建SimpleApplicationEventMulticaster 实例，注册到 ApplicationContext 中
+
+##### 事件监听器的初始化
+
+ - refresh 方法中的调用 `registerListeners()`; 会初始化所有的 listener
+
+    - 从容器中取出所有的 listener bean，然后将 listener 注册到多播器中，这样多播器一旦需要发布事件，可以直接向 listener 发布
+    - 如果有 early event 会在此时就进行发布
+
+##### 使用 @EventListener 的源码
+
+在@EventListener 中，指定了EventListenerMethodProcessor类。
+
+这个类实现了 SmartInitializingSingleton，BeanFactoryPostProcessor 两个接口
+
+ - `BeanFactoryPostProcessor` 在 bean 定义信息创建完毕后调用重写方法，
+    在EventListenerMethodProcessor中收集到所有 EventListenerFactory 类的定义信息，其中就包含 @EventListener 的注解方法，这样就能使得注解监听方法注册到容器中被调用。
+ - `SmartInitializingSingleton` 接口作用在创建单实例 bean 完成后，因为此时没有其他 bean 需要创建。就可以进行 listener 的创建，并添加到 springcontext 中
+
+### SmartInitializingSingleton 接口
+
+具体调用分析：
+
+- refresh 方法中调用 finishBeanFactoryInitialization，在所有 bean 完成初始化后调用它的方法
+ - 在 beanFactory.preInstantiateSingletons(); 中，获取到所有需要被创建的 bean 名称，然后依次getBean，如果没有就创建。在所有 bean 创建完毕后，再判断每个 bean 是否是SmartInitializingSingleton实现类，如果是就调用接口方法
+
