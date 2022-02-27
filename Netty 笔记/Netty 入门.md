@@ -347,12 +347,10 @@ closeFuture.addListener(new ChannelFutureListener() {
 
 ### Future & Promise
 
-![](/Users/eleme/Documents/notes/Netty 笔记/image-20211121135024488.png)
-
 异步处理时，常需要这两个接口，继承关系如上图所示
 
 * jdk Future 接口只能够同步等待任务结束（成功或者失败）才能够返回结果。
-* netty Future 接口可以同步（主线程调用 sync 方法）或者异步（``addListener` 方法）等待任务结束得到结果，但是都还是要等待任务结束
+* netty Future 接口可以同步（主线程调用 sync 方法）或者异步（`addListener` 方法）等待任务结束得到结果，但是都还是要等待任务结束
 * netty Promise 接口不仅有 netty Future 的功能，而且脱离了任务独立存在，只作为两个线程之间传递结果的容器
 
 > Future 可以理解为线程之间传递结果的容器，future 的结果是由产生结果的线程传递到 future 中，然后其他线程等待 future 获取到结果，再从 future 中获取结果，整个过程 future 是被动的接收。

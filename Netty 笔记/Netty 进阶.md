@@ -250,7 +250,7 @@ public class Client2 {
 主要有四个重要的字段用于解析：
 
 1. lengthFieldOffset：数据的长度字段的偏移量（起始位置）
-2. lengthFieldLength：数据的消息长度，也就是指实际内容的长度
+2. lengthFieldLength：指数据 length 属性的长度
 3. lengthAdjustment：需要修正的长度，比如下面的例子，需要修正 length 之后的 HDR2 数据。那么就写入 HDR2 的长度
 4. initialBytesToStrip：解析之后，需要去掉的长度。
 
