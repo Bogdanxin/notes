@@ -721,7 +721,691 @@ AspectJAfterThrowingAdvice#invoke
 
 ## Spring 容器创建
 
+Spring 容器的创建执行方法就是 ApplicationContext 的 refresh 方法，所有过程都是这个方法调配的。所以说，Spring 容器的创建流程就是 refresh 方法执行的流程
 
+```java
+	AbstractApplicationContext#refresh
+	@Override
+	public void refresh() throws BeansException, IllegalStateException {
+		synchronized (this.startupShutdownMonitor) {
+			// Prepare this context for refreshing.
+			prepareRefresh();
+
+			// Tell the subclass to refresh the internal bean factory.
+			ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+
+			// Prepare the bean factory for use in this context.
+			prepareBeanFactory(beanFactory);
+
+			try {
+				// Allows post-processing of the bean factory in context subclasses.
+				postProcessBeanFactory(beanFactory);
+				// --------------以上就是对 BeanFactory 的创建以及与准备工作-----------------//
+				// Invoke factory processors registered as beans in the context.
+				invokeBeanFactoryPostProcessors(beanFactory);
+
+				// Register bean processors that intercept bean creation.
+				registerBeanPostProcessors(beanFactory);
+	
+                // --------------以上是对 PostProcessors 相关的处理--------------//
+				// Initialize message source for this context.
+				initMessageSource();
+
+				// Initialize event multicaster for this context.
+				initApplicationEventMulticaster();
+
+				// Initialize other special beans in specific context subclasses.
+				onRefresh();
+
+				// Check for listener beans and register them.
+				registerListeners();
+
+				// Instantiate all remaining (non-lazy-init) singletons.
+				finishBeanFactoryInitialization(beanFactory);
+
+				// Last step: publish corresponding event.
+				finishRefresh();
+			}
+
+			catch (BeansException ex) {
+				if (logger.isWarnEnabled()) {
+					logger.warn("Exception encountered during context initialization - " +
+							"cancelling refresh attempt: " + ex);
+				}
+
+				// Destroy already created singletons to avoid dangling resources.
+				destroyBeans();
+
+				// Reset 'active' flag.
+				cancelRefresh(ex);
+
+				// Propagate exception to caller.
+				throw ex;
+			}
+
+			finally {
+				// Reset common introspection caches in Spring's core, since we
+				// might not ever need metadata for singleton beans anymore...
+				resetCommonCaches();
+			}
+		}
+	}
+
+```
+
+### BeanFactory 创建以及预准备工作
+
+#### `prepareRefresh()`
+
+首先进入对容器的准备工作。设置相关的启动时间、设置关闭以及活动属性。之后调用 `initPropertySource` 方法，交给子类进行重写，用来装载自定义配置属性。再然后对当前所有的配置信息进行验证。最后设置**监听器**以及**初始化事件列表**。
+
+总结：prepareRefresh 方法主要是在给容器进行初始化的属性赋值，对必要的配置进行解析和验证。
+
+#### `beanFactory =  = obtainFreshBeanFactory()`
+
+这个方法就调用了两个方法，分别是 `refreshBeanFactory();`和`getBeanFactory();`前者设置了 BeanFactory 的刷新属性为 true，并对 BeanFactory 设置一个序列化 id；后者就是从 springContext 中获取到 beanFactory。把设置好 id 的 BeanFactory 返回给 refresh 方法中。
+
+#### `prepareBeanFactory(beanFactory)`
+
+对拿到的beanFactory 进行属性设置：
+
+* 设置类加载器、表达式解析器、配置解析器
+
+* 添加一个 BeanPostProcessor 【ApplicationContextAwareProcessor】
+
+    并设置即使使用自动注入也需要忽略的接口，如：EnvironmentAware、ApplicationEventPublisherAware、ApplicationContextAware 等等。这些不能通过自动注入添加到 bean 中，需要 bean 自行实现接口才可以
+
+* 使响应的自动装配注册一个特殊的依赖类型。适用于应该是可自动装配但未在工厂中定义为 bean 的工厂/上下文引用：例如，ApplicationContext 类型的依赖项解析为 bean 所在的 ApplicationContext 实例。
+
+* 注册若干环境变量相关的配置类 bean：environment、systemProperties等等
+
+总结：就是对从上个方法中得到的普通的 BeanFactory 进行属性赋值
+
+#### `postProcessBeanFactory(beanFactory)`
+
+交给子类重写方法，调用传入的 BeanFactory 作进一步的设置。
+
+### PostProcessor 相关的处理
+
+#### `invokeBeanFactoryPostProcessors(beanFactory);`
+
+BeanFactoryPostProcessor 是 BeanFactory 的 后置处理器，在bean 定义信息即将加载，bean 实例还未被实例化之前被调用。同时 BeanFactoryPostProcessor 还有一个子类接口 BeanDefinitionRegistryPostProcessor，他也是在 bean 定义信息即将加载，bean 实例还未被初始化之前被调用。看似相同，其实还有一些不同之处，可以根据源码进行分析。
+
+> BeanDefinitionRegistryPostProcessor: This allows for adding further bean definitions before the next post-processing phase kicks in. 在下一个处理阶段之前进一步添加 bean 的定义。
+>
+> BeanFactoryPostProcessor: This allows for overriding or adding properties even to eager-initializing beans. 用来初重写或者添加属性，甚至率先初始化 bean
+
+invokeBeanFactoryPostProcessors 方法中，首先会对 BeanDefinitionRegistryPostProcessor 接口的方法进行调用。会先按照 PriorityOrder 接口实现、Order 实现、无接口实现的顺序进行排序，然后依次调用 postProcessBeanDefinitionRegistry 方法；之后再会对 BeanFactoryPostProcessor 的方法进行调用，也是相同的规则，先排序后调用。这只是表面上的执行，其实细节有很多。
+
+```java
+
+	public static void invokeBeanFactoryPostProcessors(
+			ConfigurableListableBeanFactory beanFactory, List<BeanFactoryPostProcessor> beanFactoryPostProcessors) {
+
+		// Invoke BeanDefinitionRegistryPostProcessors first, if any.
+        // 记录已经执行过的 PostProcessor，特别是在执行 BeanFactoryPostProcessor 时候特别需要
+		Set<String> processedBeans = new HashSet<>();
+
+		if (beanFactory instanceof BeanDefinitionRegistry) {
+			BeanDefinitionRegistry registry = (BeanDefinitionRegistry) beanFactory;
+			List<BeanFactoryPostProcessor> regularPostProcessors = new ArrayList<>();
+			List<BeanDefinitionRegistryPostProcessor> registryProcessors = new ArrayList<>();
+			
+            // 省略...
+
+			List<BeanDefinitionRegistryPostProcessor> currentRegistryProcessors = new ArrayList<>();
+
+			// First, invoke the BeanDefinitionRegistryPostProcessors that implement PriorityOrdered.
+            // 这时 beanFactory 中只有一个 postProcessor，是一个关于 Configuration 的 
+            // postProcessor: internalConfigurationAnnotationProcessor
+            // 由于它实现了 PriorityOrder 接口，所以它率先执行 postProcessBeanDefinitionRegistry 
+            // 执行时，会对向容器中注册的配置类 @Configuration 进行解析，进而对配置类注册的 bean 进行相关等操作
+			String[] postProcessorNames =
+					beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+			for (String ppName : postProcessorNames) {
+				if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+					currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					processedBeans.add(ppName);
+				}
+			}
+			sortPostProcessors(currentRegistryProcessors, beanFactory);
+			registryProcessors.addAll(currentRegistryProcessors);
+			invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+			currentRegistryProcessors.clear();
+			
+            // 在上面的 internalConfigurationAnnotationProcessor 执行完毕后，
+            // 如果我们自行编写的配置类中有导入 BeanDefinitionRegistryPostProcessors 接口的实现类，
+            // 在 getBeanNamesForType 方法后，就会找到相关 bean 定义信息，
+            // 之前 internalConfigurationAnnotationProcessor 也会存在
+			// Next, invoke the BeanDefinitionRegistryPostProcessors that implement Ordered.
+			postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+			for (String ppName : postProcessorNames) {
+                // 这里 processedBeans 记录了之前执行过的 PostProcessor ，
+                // 所以internalConfigurationAnnotationProcessor 不会添加，只会添加自定义实现 Order 接口的。
+                // 当然如果这里的 PostProcessor 也会向 BeanFactory 中添加新的相关 bean，
+                // 也会在之后没有 Order 的类中执行。
+				if (!processedBeans.contains(ppName) && beanFactory.isTypeMatch(ppName, Ordered.class)) {
+					currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					processedBeans.add(ppName);
+				}
+			}
+			sortPostProcessors(currentRegistryProcessors, beanFactory);
+			registryProcessors.addAll(currentRegistryProcessors);
+			invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+			currentRegistryProcessors.clear();
+			// 最后执行没有实现排序接口给的实例
+			// Finally, invoke all other BeanDefinitionRegistryPostProcessors until no further ones appear.
+			boolean reiterate = true;
+			while (reiterate) {
+				reiterate = false;
+				postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+				for (String ppName : postProcessorNames) {
+					if (!processedBeans.contains(ppName)) {
+						currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+						processedBeans.add(ppName);
+						reiterate = true;
+					}
+				}
+				sortPostProcessors(currentRegistryProcessors, beanFactory);
+				registryProcessors.addAll(currentRegistryProcessors);
+				invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+				currentRegistryProcessors.clear();
+			}
+
+			// Now, invoke the postProcessBeanFactory callback of all processors handled so far.
+            // 因为 BeanDefinitionRegistryPostProcessors 也是 BeanFactoryPostProcessor 子接口，
+            // 所以最后会执行 BeanDefinitionRegistryPostProcessors 重写 BeanFactoryPostProcessor的方法
+			invokeBeanFactoryPostProcessors(registryProcessors, beanFactory);
+			invokeBeanFactoryPostProcessors(regularPostProcessors, beanFactory);
+		}
+
+		else {
+			// Invoke factory processors registered with the context instance.
+			invokeBeanFactoryPostProcessors(beanFactoryPostProcessors, beanFactory);
+		}
+
+		// Do not initialize FactoryBeans here: We need to leave all regular beans
+		// uninitialized to let the bean factory post-processors apply to them!
+        // 这里再去 getBeanNamesForType 一遍是因为上文中会有可能一边执行 PostProcessor 
+        // 一边向容器中注册相关的 BeanFactoryPostProcessor
+		String[] postProcessorNames =
+				beanFactory.getBeanNamesForType(BeanFactoryPostProcessor.class, true, false);
+
+		// Separate between BeanFactoryPostProcessors that implement PriorityOrdered,
+		// Ordered, and the rest.
+		List<BeanFactoryPostProcessor> priorityOrderedPostProcessors = new ArrayList<>();
+		List<String> orderedPostProcessorNames = new ArrayList<>();
+		List<String> nonOrderedPostProcessorNames = new ArrayList<>();
+        // 进行排序
+		for (String ppName : postProcessorNames) {
+            // 跳过所有已经执行的 bean
+			if (processedBeans.contains(ppName)) {
+				// skip - already processed in first phase above
+			}
+			else if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+				priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanFactoryPostProcessor.class));
+			}
+			else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+				orderedPostProcessorNames.add(ppName);
+			}
+			else {
+				nonOrderedPostProcessorNames.add(ppName);
+			}
+		}
+
+		// 按照顺序执行，省略...
+	}
+
+```
+
+#### `registerBeanPostProcessor(beanFactory)`
+
+![image-20220228111545354](https://raw.githubusercontent.com/Bogdanxin/cloudImage/master/image-20220228111545354.png)
+
+以上为 BeanPostProcessor 的子类接口，registerBeanPostProcessor 作用是将声明的 BeanPostProcessor 注册到 BeanFactory 中，等待之后的调用。
+
+方法执行的逻辑很简单，首先拿到所有的 BeanPostProcessor，然后进行遍历，首先查看实现 PriorityOrdered 接口的，如果既实现PriorityOrdered同时又实现MergedBeanDefinitionPostProcessor接口，特殊存放到一个列表中执行。其他的逻辑相似，都是排序后执行`registerBeanPostProcessors`方法。将排序好的 BeanPostProcessors 由 bean 转为 PostProcessor 再次注册到 beanFactory 中。
+
+> 特别注意的是，同时实现 MergedBeanDefinitionPostProcessor 和 PriorityOrder的后置处理器需要排序完成后添加，因为 MergedBeanDefinitionPostProcessor 的方法是用来将 bean 定义信息进行合并的，所以需要滞后添加。
+
+最后将`ApplicationListenerDetector`这个 BeanPostProcessor 注册到 BeanFactory 中，用于 bean 在注册时候向 applicationContext 中添加 listener。
+
+### 国际化、派发器、监听器创建
+
+#### `initMessageSource()`
+
+初始化MessageSource组件（做国际化功能；消息绑定，消息解析）
+
+* 获取BeanFactory
+
+* 看容器中是否有id为messageSource的，类型是MessageSource的组件，如果有赋值给messageSource，如果没有自己创建一个DelegatingMessageSource；
+
+    MessageSource：取出国际化配置文件中的某个key的值；能按照区域信息获取；
+
+* 把创建好的MessageSource注册在容器中，以后获取国际化配置文件的值的时候，可以自动注入MessageSource：
+    beanFactory.registerSingleton(MESSAGE_SOURCE_BEAN_NAME, this.messageSource);
+
+#### `initApplicationEventMulticaster()`
+
+初始化事件派发器；
+
+1. 获取BeanFactory
+2. 从BeanFactory中获取applicationEventMulticaster的ApplicationEventMulticaster；
+3. 如果上一步没有配置，创建一个SimpleApplicationEventMulticaster
+4. 将创建的ApplicationEventMulticaster添加到BeanFactory中，以后其他组件直接自动注入
+
+#### `onRefresh()`
+
+留给子类容器重写方法
+
+#### ``registerListener()``
+
+给容器中将所有项目里面的ApplicationListener注册进来
+
+1. 从容器中拿到所有的ApplicationListener
+2. 将每个监听器添加到事件派发器中: `getApplicationEventMulticaster().addApplicationListenerBean(listenerBeanName)`
+3. 派发之前步骤产生的事件，默认不会产生。
+
+### 对 bean 的初始化
+
+#### `finishBeanFactoryInitialization()`
+
+这个方法会将所有剩下的 bean 进行初始化。所以是最重要的方法。在这个方法中，会对 beanFactory 属性进行完善：设置ConversionService 类型转换组件、设置EmbeddedValueResolve 值解析器等等。之后的`beanFactory.preInstantiateSingletons();` 方法才是重点。
+
+```java
+
+	@Override
+	public void preInstantiateSingletons() throws BeansException {
+		
+		// Iterate over a copy to allow for init methods which in turn register new bean definitions.
+		// While this may not be part of the regular factory bootstrap, it does otherwise work fine.
+        // 拿到所有的 beanName，不论这个 bean 是否已经注册到 spring 容器中了
+		List<String> beanNames = new ArrayList<>(this.beanDefinitionNames);
+
+		// Trigger initialization of all non-lazy singleton beans...
+		for (String beanName : beanNames) {
+			RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);
+            // 如果这个 BeanDefinition 不是抽象的 && 是单实例 && 不是懒加载，就调用 getBean 获取这个 bean
+			if (!bd.isAbstract() && bd.isSingleton() && !bd.isLazyInit()) {
+                // 如果这个 Bean 实现了 FactoryBean 接口，可以通过 FactoryBean#getObjet 获取对应的 bean 实例
+                // 通过 if 分支进行创建对应的 Bean 实例
+				if (isFactoryBean(beanName)) {
+					Object bean = getBean(FACTORY_BEAN_PREFIX + beanName);
+					if (bean instanceof FactoryBean) {
+						final FactoryBean<?> factory = (FactoryBean<?>) bean;
+						boolean isEagerInit;
+						if (System.getSecurityManager() != null && factory instanceof SmartFactoryBean) {
+							isEagerInit = AccessController.doPrivileged((PrivilegedAction<Boolean>)
+											((SmartFactoryBean<?>) factory)::isEagerInit,
+									getAccessControlContext());
+						}
+						else {
+							isEagerInit = (factory instanceof SmartFactoryBean &&
+									((SmartFactoryBean<?>) factory).isEagerInit());
+						}
+						if (isEagerInit) {
+							getBean(beanName);
+						}
+					}
+				}
+				else {
+                    // 如果只是简单的 bean ，那就直接通过 getBean获取
+					getBean(beanName);
+				}
+			}
+		}
+
+		// Trigger post-initialization callback for all applicable beans...
+        // SmartInitializingSingleton 接口实现类的 bean 在 bean 全部实例化后
+        // 执行 afterSingletonsInstantiated，
+		for (String beanName : beanNames) {
+			Object singletonInstance = getSingleton(beanName);
+			if (singletonInstance instanceof SmartInitializingSingleton) {
+				final SmartInitializingSingleton smartSingleton = (SmartInitializingSingleton) singletonInstance;
+				if (System.getSecurityManager() != null) {
+					AccessController.doPrivileged((PrivilegedAction<Object>) () -> {
+						smartSingleton.afterSingletonsInstantiated();
+						return null;
+					}, getAccessControlContext());
+				}
+				else {
+					smartSingleton.afterSingletonsInstantiated();
+				}
+			}
+		}
+	}
+
+
+```
+
+可以看出，getBean 是一个很重要的方法，所以需要进一步跟进到 getBean 方法，一直跟进到 doGetBean 方法。重点关注循环依赖解决以及 bean 的创建。
+
+```java
+	@SuppressWarnings("unchecked")
+	protected <T> T doGetBean(final String name, @Nullable final Class<T> requiredType,
+			@Nullable final Object[] args, boolean typeCheckOnly) throws BeansException {
+
+		final String beanName = transformedBeanName(name);
+		Object bean;
+
+        // 提前 check 一下 beanName 对应的 bean 是否在 cache 中，并判断是否需要解决循环依赖的问题
+		// Eagerly check singleton cache for manually registered singletons.
+		Object sharedInstance = getSingleton(beanName);
+		if (sharedInstance != null && args == null) {
+			// 省略打日志
+			bean = getObjectForBeanInstance(sharedInstance, name, beanName, null);
+		}
+
+		else {
+			// Fail if we're already creating this bean instance:
+			// We're assumably within a circular reference.
+			if (isPrototypeCurrentlyInCreation(beanName)) {
+				throw new BeanCurrentlyInCreationException(beanName);
+			}
+
+			// Check if bean definition exists in this factory.
+			BeanFactory parentBeanFactory = getParentBeanFactory();
+			if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
+				//省去不重要代码
+			}
+			// 设置正在创建 bean 的标志，防止多线程下同时创建的问题
+			if (!typeCheckOnly) {
+				markBeanAsCreated(beanName);
+			}
+
+			try {
+				final RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
+				checkMergedBeanDefinition(mbd, beanName, args);
+				// 首先判断当前的 bean 是否有循环依赖：先拿到 bean 的依赖信息@DependOn
+                // 如果有依赖，就优先执行对依赖的 getBean，进入到递归的模式
+				// Guarantee initialization of beans that the current bean depends on.
+				String[] dependsOn = mbd.getDependsOn();
+				if (dependsOn != null) {
+					for (String dep : dependsOn) {
+                        // 进行循环依赖判断的方法，把当前 name 缓存起来，如果递归过程中发现再次出现，
+                        // 说明出现了循环依赖的问题。
+						if (isDependent(beanName, dep)) {
+							throw new BeanCreationException;
+						}
+						registerDependentBean(dep, beanName);
+						try {
+							getBean(dep);
+						}
+						
+					}
+				}
+				// 最后创建这个 bean 实例
+				// Create bean instance.
+				if (mbd.isSingleton()) {
+					sharedInstance = getSingleton(beanName, () -> {
+						try {
+							return createBean(beanName, mbd, args);
+						} catch ...
+					});
+					bean = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);
+				}
+				// 如果是原型模式，每次都创建一个实例
+				else if (mbd.isPrototype()) {
+					// It's a prototype -> create a new instance.
+					Object prototypeInstance = null;
+					try {
+						beforePrototypeCreation(beanName);
+						prototypeInstance = createBean(beanName, mbd, args);
+					}
+					finally {
+						afterPrototypeCreation(beanName);
+					}
+					bean = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);
+				}
+				// 既不是原型也不是单例，是其他的，那就根据作用范围自行创建了。
+				else {
+					String scopeName = mbd.getScope();
+					final Scope scope = this.scopes.get(scopeName);
+					if (scope == null) {
+						throw new IllegalStateException("No Scope registered for scope name '" + scopeName + "'");
+					}
+					try {
+						Object scopedInstance = scope.get(beanName, () -> {
+							beforePrototypeCreation(beanName);
+							try {
+								return createBean(beanName, mbd, args);
+							}
+							finally {
+								afterPrototypeCreation(beanName);
+							}
+						});
+						bean = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
+					} catch 
+				}
+			} catch
+		}
+
+		// Check if required type matches the type of the actual bean instance.
+        // 最后的判断方法省略
+		
+		return (T) bean;
+	}
+
+```
+
+继续跟进到 createBean 方法中，主要有两个重要的方法：① `Object bean = resolveBeforeInstantiation(beanName, mbdToUse)`；② `Object beanInstance = doCreateBean(beanName, mbdToUse, args);`
+
+① 获取了 beanFactory 中所有之前注册了的 InstantiationAwareBeanPostProcessor 接口实现类，依次调用postProcessBeforeInstantiation 方法对 bean 定义信息进行加工处理，如果处理的 bean 不为空，就继续调用 BeanPostProcessor 的 postProcessAfterInitialization 方法，注意这两个方法是父子类之间的方法。
+
+```java
+	@Nullable
+	protected Object resolveBeforeInstantiation(String beanName, RootBeanDefinition mbd) {
+		Object bean = null;
+		if (!Boolean.FALSE.equals(mbd.beforeInstantiationResolved)) {
+			// Make sure bean class is actually resolved at this point.
+			if (!mbd.isSynthetic() && hasInstantiationAwareBeanPostProcessors()) {
+				Class<?> targetType = determineTargetType(beanName, mbd);
+				if (targetType != null) {
+					bean = applyBeanPostProcessorsBeforeInstantiation(targetType, beanName);
+					if (bean != null) {
+						bean = applyBeanPostProcessorsAfterInitialization(bean, beanName);
+					}
+				}
+			}
+			mbd.beforeInstantiationResolved = (bean != null);
+		}
+		return bean;
+	}
+```
+
+
+
+所以由此可知，InstantiationAwareBeanPostProcessor 接口实现类作为 BeanPostProcessor 在refresh 的 registerBeanPostProcessors中就被注册，在每个 bean 创建之前被调用对 bean 进行自定义修改。
+
+这类接口 InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation 一般用于代理对象的创建，一旦对 bean 创建了代理对象，或者说resolveBeforeInstantiation 方法返回值不为空，直接返回代理对象。就不会继续执行下面的 doCreateBean 方法了。
+
+② 如果没有产生代理对象，就执行 doCreateBean 方法。
+
+```java
+	protected Object doCreateBean(final String beanName, final RootBeanDefinition mbd, final @Nullable Object[] args)
+			throws BeanCreationException {
+
+		// Instantiate the bean.
+		BeanWrapper instanceWrapper = null;
+		if (mbd.isSingleton()) {
+			instanceWrapper = this.factoryBeanInstanceCache.remove(beanName);
+		}
+        // 首先尝试创建一个 bean 实例，但是bean 的属性都为空
+		if (instanceWrapper == null) {
+			instanceWrapper = createBeanInstance(beanName, mbd, args);
+		}
+        // 生成对应类的 bean
+		final Object bean = instanceWrapper.getWrappedInstance();
+		Class<?> beanType = instanceWrapper.getWrappedClass();
+		if (beanType != NullBean.class) {
+			mbd.resolvedTargetType = beanType;
+		}
+
+		// Allow post-processors to modify the merged bean definition.
+		synchronized (mbd.postProcessingLock) {
+			if (!mbd.postProcessed) {
+				try {
+                    // 执行 MergedBeanDefinitionPostProcessor 方法
+					applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName);
+				} catch...
+				mbd.postProcessed = true;
+			}
+		}
+
+		// Initialize the bean instance.
+		Object exposedObject = bean;
+		try {
+            // 首先对 bean 进行赋值
+			populateBean(beanName, mbd, instanceWrapper);
+            // 调用 bean 的相关 init 方法，中间夹杂着 PostProcessor 的调用，之后可以仔细看
+			exposedObject = initializeBean(beanName, exposedObject, mbd);
+		} catch ...
+
+		// 省略不重要代码
+
+		// Register bean as disposable.
+        // 注册销毁方法，等到容器close 后执行
+		try {
+			registerDisposableBeanIfNecessary(beanName, bean, mbd);
+		}
+		catch (BeanDefinitionValidationException ex) {
+			throw new BeanCreationException(
+					mbd.getResourceDescription(), beanName, "Invalid destruction signature", ex);
+		}
+
+		return exposedObject;
+	}
+
+```
+
+首先查看 populateBean 方法，负责对 bean 进行属性赋值
+
+```java
+	@SuppressWarnings("deprecation")  // for postProcessPropertyValues
+	protected void populateBean(String beanName, RootBeanDefinition mbd, @Nullable BeanWrapper bw) {
+		
+        // 执行 InstantiationAwareBeanPostProcessor 的 postProcessAfterInstantiation 
+        // 和之前的 postProcessBeforeInstantiation 正好合在一起，默认返回 true
+		if (!mbd.isSynthetic() && hasInstantiationAwareBeanPostProcessors()) {
+			for (BeanPostProcessor bp : getBeanPostProcessors()) {
+				if (bp instanceof InstantiationAwareBeanPostProcessor) {
+					InstantiationAwareBeanPostProcessor ibp = (InstantiationAwareBeanPostProcessor) bp;
+					if (!ibp.postProcessAfterInstantiation(bw.getWrappedInstance(), beanName)) {
+						return;
+					}
+				}
+			}
+		}
+
+		PropertyValues pvs = (mbd.hasPropertyValues() ? mbd.getPropertyValues() : null);
+
+		// 设置属性值
+
+		
+		if (hasInstAwareBpps) {
+			if (pvs == null) {
+				pvs = mbd.getPropertyValues();
+			}
+            // 继续执行 InstantiationAwareBeanPostProcessor 的特殊方法，主要与 bean 属性赋值有关。
+			for (BeanPostProcessor bp : getBeanPostProcessors()) {
+				if (bp instanceof InstantiationAwareBeanPostProcessor) {
+					// 
+				}
+			}
+		}
+		
+        // 对 bean 进行属性赋值
+		if (pvs != null) {
+			applyPropertyValues(beanName, mbd, bw, pvs);
+		}
+	}
+
+```
+
+`populatedBean `主要执行了以下几个逻辑：1. 后置处理器对 bean 进行检查 2. 对 bean 相关属性设置，3. 最后进行属性赋值
+
+跟进到 `initializeBean` 方法
+
+
+
+```java
+
+	protected Object initializeBean(final String beanName, final Object bean, @Nullable RootBeanDefinition mbd) {
+		// 如果bean 实现了 Aware 相关接口，那么就可以对 bean注入 Spring 上下文相关内容了
+		invokeAwareMethods(beanName, bean);
+
+		Object wrappedBean = bean;
+        // 调用容器中所有的 BeanPostProcessor 的 postProcessBeforeInitialization 方法
+        // 在 bean 调用相关初始化方法之前被调用
+		if (mbd == null || !mbd.isSynthetic()) {
+			wrappedBean = applyBeanPostProcessorsBeforeInitialization(wrappedBean, beanName);
+		}
+
+		try {
+            // 调用初始化相关的方法。比如 Bean 实现 InitializingBean 的 afterPropertiesSet 方法
+            // @Bean(init-method) 等等
+			invokeInitMethods(beanName, wrappedBean, mbd);
+		} catch ...
+            
+        // 最后调用容器中所有的 BeanPostProcessor 的 postProcessAfterInitialization 方法
+        // 在 bean 调用相关初始化方法之后被调用
+		if (mbd == null || !mbd.isSynthetic()) {
+			wrappedBean = applyBeanPostProcessorsAfterInitialization(wrappedBean, beanName);
+		}
+
+		return wrappedBean;
+	}
+
+	// 判断 bean 实现的 Aware 接口，set 对应的属性，供之后 bean 使用。
+	private void invokeAwareMethods(final String beanName, final Object bean) {
+		if (bean instanceof Aware) {
+			if (bean instanceof BeanNameAware) {
+				((BeanNameAware) bean).setBeanName(beanName);
+			}
+			if (bean instanceof BeanClassLoaderAware) {
+				ClassLoader bcl = getBeanClassLoader();
+				if (bcl != null) {
+					((BeanClassLoaderAware) bean).setBeanClassLoader(bcl);
+				}
+			}
+			if (bean instanceof BeanFactoryAware) {
+				((BeanFactoryAware) bean).setBeanFactory(AbstractAutowireCapableBeanFactory.this);
+			}
+		}
+	}
+
+	protected void invokeInitMethods(String beanName, final Object bean, @Nullable RootBeanDefinition mbd)
+			throws Throwable {
+
+		boolean isInitializingBean = (bean instanceof InitializingBean);
+		if (isInitializingBean && (mbd == null || !mbd.isExternallyManagedInitMethod("afterPropertiesSet"))) {
+			// 省略相关判断，执行 InitializingBean 接口的 afterPropertiesSet 方法
+				((InitializingBean) bean).afterPropertiesSet();
+			
+		}
+        
+        // 执行自定义的 init-Method 方法
+		if (mbd != null && bean.getClass() != NullBean.class) {
+			String initMethodName = mbd.getInitMethodName();
+			if (StringUtils.hasLength(initMethodName) &&
+					!(isInitializingBean && "afterPropertiesSet".equals(initMethodName)) &&
+					!mbd.isExternallyManagedInitMethod(initMethodName)) {
+				invokeCustomInitMethod(beanName, bean, mbd);
+			}
+		}
+	}
+
+```
+
+综上，bean 在创建阶段，调用了很多 PostProcessor 进行包装，在正式创建 bean 之前，先通过 `InstantiationAwareBeanPostProcessor#applyBeanPostProcessorsBeforeInstantiation` 接口进行代理 bean 的创建，如果没有代理对象就在 `doCreateBean`方法正式对 bean 赋值前调用 MergedBeanDefinitionPostProcessor ，然后在 bean 赋值之后调用 init 相关方法前后调用 BeanPostProcessor 的 After 和 Before 方法
+
+### finishRefresh()
+
+完成BeanFactory的初始化创建工作；IOC容器就此创建完成；
+
+* `initLifecycleProcessor()` 初始化和生命周期有关的后置处理器；LifecycleProcessor 默认从容器中找是否有lifecycleProcessor的组件【LifecycleProcessor】；如果没有创建一个加入到容器；写一个LifecycleProcessor的实现类，可以在BeanFactory 使用
+* `getLifecycleProcessor(）.onRefresh();`拿到前面定义的生命周期处理器（BeanFactory）；回调onRefresh()方法
+* `publishEvent(new ContextRefreshedEvent(this));`发布容器刷新完成事件； 
 
 ## Spring 拓展
 
@@ -732,7 +1416,7 @@ AspectJAfterThrowingAdvice#invoke
 #### 与BeanPostProcessor 不同之处
 
 - BeanPostProcessor 是 bean 的后置处理器，bean 创建对象初始化前后进行拦截工作
-- BeanFactoryPostProcessor 是 BeanFactory 的后置处理器，在 BeanFactory 标准初始化后调用，所有的 bean 定义信息已经加载到 beanFactory，但是还未创建实例
+- BeanFactoryPostProcessor 是 BeanFactory 的后置处理器，在 BeanFactory 标准初始化后调用，所有的 bean 定义信息即将加载到 beanFactory，但是还未创建实例
 
 #### 调用流程
 
